@@ -38,6 +38,6 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-username/hypercontext"
-Repository = "https://github.com/your-username/hypercontext.git"
-Issues = "https://github.com/your-username/hypercontext/issues"
+Homepage = "https://github.com/eduardotoffol8-a11y/hypercontext"
+Repository = "https://github.com/eduardotoffol8-a11y/hypercontext.git"
+Issues = "https://github.com/eduardotoffol8-a11y/hypercontext/issues"

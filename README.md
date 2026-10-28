@@ -92,7 +92,7 @@ Simulated 10-turn iterative software engineering session using Claude 3.5 Sonnet
 HyperContext requires **no third-party dependencies** (pure standard library: `ast`, `re`, `urllib`, `dataclasses`).
 
 ```bash
-git clone https://github.com/your-username/hypercontext.git
+git clone https://github.com/eduardotoffol8-a11y/hypercontext.git
 cd hypercontext
 python benchmarks.py
 ```
