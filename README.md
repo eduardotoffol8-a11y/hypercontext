@@ -1,183 +1,110 @@
-# HyperContext ⚡
-### High-Performance Context Compaction & Prompt Caching Orchestration Engine
+# HyperContext
 
-[![Python Version](https://img.shields.io/badge/python-3.9%20%7C%203.10%20%7C%203.11%20%7C%203.12-blue.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Build Status](https://img.shields.io/badge/tests-passing-brightgreen.svg)]()
-[![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-success.svg)]()
-[![Cost Reduction](https://img.shields.io/badge/token%20cost--70%25%20to--90%25-green.svg)]()
+A small Python reference implementation of provider-native prompt caching and
+token-usage accounting for text conversations. Runtime uses only the Python
+standard library. This is an educational project, not a production agent platform.
 
-**HyperContext** is a lightweight, zero-dependency engine designed to solve context bloat, attention degradation (*"Lost-in-the-Middle"*), and escalating token costs in autonomous multi-turn LLM agent workflows.
+## What this project demonstrates
 
-It orchestrates **Static Prefix Prompt Caching** (Anthropic Claude Ephemeral Caching, OpenAI Prefix Caching, vLLM RadixAttention) with an **AST-Aware Dynamic Context Pruner** that replaces stale historical artifacts with syntactic stubs.
+- An explicit cache breakpoint on an Anthropic system prompt.
+- Stable system instructions at the beginning of OpenAI Chat Completions requests;
+  actual cache reuse is managed by the provider.
+- Provider-specific token accounting and optional cost estimates using rates you supply.
+- Complete preservation of submitted message history, including old code blocks.
 
----
+Cache reuse depends on the model, exact matching prefix, cache lifetime, request
+length and provider routing. This client cannot guarantee cache hits or savings.
+Caching does not shrink the context window or prevent context overflow.
 
-## 📌 Problem Statement: The $O(N^2)$ Context Dilemma
+## Why the scope changed in 0.2.0
 
-In autonomous coding agents (e.g., iterative refactoring, test-driven loops, multi-step planning):
+An audit found that the previous code-block pruning policy could remove relevant
+information and claim that code had been committed without checking any files or
+Git state. That functionality has been removed, including the `ContextPruner` API.
+The old simulated savings table, static passing-test badge, performance guarantees,
+and unverified local-inference compatibility claims have also been removed.
 
-1. **Quadratic Prefill Accumulation:** Each conversation turn re-transmits the cumulative history of all previous code blocks, diffs, and execution traces.
-2. **Context Saturation:** Long dialogues quickly saturate 4k–32k context budgets, causing catastrophic token overflow or degrading reasoning depth.
-3. **Financial Inefficiency:** Without prefix caching, developers pay full price repeatedly for static documentation, system prompts, and un-mutated codebase definitions.
+The historical benchmark did not measure API bills, latency, task completion or
+answer quality. Its results must not be presented as measured production savings.
+See [the audit and validation record](docs/AUDIT.md).
 
-```
-Without HyperContext (Linear Growth -> Quadratic Cost):
-Turn 1: [Sys] + [User1] + [Assistant Code 1]                          (~3,000 tokens)
-Turn 5: [Sys] + [U1] + [A1] + [U2] + [A2] ... + [U5]                 (~6,500 tokens)
-Turn 10: [Sys] + Cumulative Historical Dead Weight                  (~10,000 tokens / turn)
+## Run locally
 
-With HyperContext (Bounded History + 90% Cached System Prefix):
-Turn 1: [Cached Sys] + [User1] + [Assistant Code 1]                   (100% Cache Write)
-Turn 5: [Cached Sys (90% off)] + [AST Stubs (Old)] + [Active Turn]   (Bounded to ~3,500 tokens)
-Turn 10: [Cached Sys (90% off)] + [AST Stubs (Old)] + [Active Turn]  (Stable ~3,800 tokens)
-```
-
----
-
-## 🏗️ Architectural Overview
-
-```mermaid
-flowchart TD
-    subgraph Input["Agent Dialogue Stream"]
-        SYS["Static System Rules & Specs"]
-        HIST["Multi-Turn Historical Messages"]
-        ACTIVE["Active Turn Request"]
-    end
-
-    subgraph Engine["HyperContext Pipeline"]
-        CP["ContextPruner<br/>(AST Symbol Extractor)"]
-        CA["CachedAgentAdapter<br/>(Prefix Alignment)"]
-    end
-
-    subgraph Target["LLM Providers"]
-        CLAUDE["Anthropic Claude<br/>(cache_control: ephemeral)"]
-        OAI["OpenAI GPT-4o<br/>(Automatic Prefix Cache)"]
-        LOCAL["vLLM / llama.cpp<br/>(Slot / Radix Attention)"]
-    end
-
-    HIST -->|Filter Dead Code| CP
-    CP -->|Syntactic Stubs| CA
-    SYS -->|Freeze Byte Prefix| CA
-    ACTIVE --> CA
-
-    CA -->|90% Cost Reduction| CLAUDE
-    CA -->|50% Cost Reduction| OAI
-    CA -->|Zero TTFT Overhead| LOCAL
-```
-
----
-
-## 📊 Empirical Benchmarks
-
-Simulated 10-turn iterative software engineering session using Claude 3.5 Sonnet pricing:
-
-| Turn | Raw Cumulative Prompt | HyperContext Pruned Prompt | Dynamic Reduction | Baseline Cost ($) | HyperContext Cost ($) | Net Turn Savings |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **1** | 3,219 tok | 3,219 tok | 0.0% | \$0.0149 | \$0.0082 | **45.3%** |
-| **3** | 4,658 tok | 3,364 tok | 60.0% | \$0.0192 | \$0.0086 | **55.3%** |
-| **5** | 6,097 tok | 3,510 tok | 71.9% | \$0.0235 | \$0.0090 | **61.6%** |
-| **7** | 7,536 tok | 3,655 tok | 77.1% | \$0.0279 | \$0.0095 | **66.0%** |
-| **10** | 9,695 tok | 3,874 tok | **80.9%** | \$0.0343 | \$0.0101 | **70.5%** |
-
-* **Cumulative Session Savings:** **62.9% net dollar reduction** on 10 turns (>80% on 20+ turns).
-* **Context Saturation Avoided:** Historical dynamic dialogue is bounded under ~800 tokens permanently.
-
----
-
-## 🚀 Quickstart
-
-### Installation
-
-HyperContext requires **no third-party dependencies** (pure standard library: `ast`, `re`, `urllib`, `dataclasses`).
+Requires Python 3.9 or newer. Local validation was performed with Python 3.11;
+the repository CI defines additional version checks.
 
 ```bash
 git clone https://github.com/eduardotoffol8-a11y/hypercontext.git
 cd hypercontext
+python -m unittest discover -s tests -p "test_*.py"
+python example_agent.py
 python benchmarks.py
 ```
 
-### Production Usage with Anthropic Claude
+The example and cost simulation run offline and do not require credentials.
+The file `benchmarks.py` is retained for command compatibility: it is an arithmetic
+scenario illustration, not an empirical performance benchmark.
+
+## Calling a provider
+
+Set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in your environment. Select a model
+currently available to your account; the client has no hardcoded model default.
 
 ```python
+import os
 from caching_client import CloudAgentClient
 
-# Initialize client for Claude 3.5 Sonnet or Claude Opus
-client = CloudAgentClient(provider="anthropic", api_key="sk-ant-...")
-
-system_prompt = """
-You are the Lead Systems Architect.
-[Large specification, API documentation, database schemas (>2,048 tokens)...]
-"""
-
-dialogue_history = [
-    {"role": "user", "content": "Implement auth middleware."},
-    {"role": "assistant", "content": "### auth.py\n```python\n# 80 lines of code...\n```"}
-]
-
-# Execute turn with combined Context Pruning & Prompt Caching
-response, telemetry = client.execute_turn(
-    system_prompt=system_prompt,
-    history=dialogue_history,
-    user_message="Add JWT signature verification to auth.py",
-    enable_prompt_cache=True,       # Inserts cache_control: {type: ephemeral}
-    enable_context_pruning=True,    # Replaces stale historical code with AST stubs
-    active_target_files=["auth.py"] # Protects target file from being compacted
+client = CloudAgentClient(provider="anthropic", model=os.environ["ANTHROPIC_MODEL"])
+answer, usage = client.execute_turn(
+    system_prompt="You review code and preserve user requirements.",
+    history=[{"role": "user", "content": "All exported dates must use UTC."}],
+    user_message="Explain the requirement you must preserve.",
 )
-
-print(f"Assistant Response:\n{response}")
-print(f"Tokens Saved: {telemetry.cost_savings_percent}% | Net Cost: ${telemetry.estimated_cost_usd}")
+print(answer)
+print(usage.prompt_tokens, usage.cache_read_tokens)
 ```
 
-### Standalone Context Pruner Usage
+This sends your supplied system prompt, history and current message to the selected
+provider. Use only data you are authorized to send. The library does not log API keys,
+persist conversations, execute generated code, edit files or make Git commits.
+Provider retention and privacy terms still apply; caching is not a security boundary.
 
-You can use `ContextPruner` directly inside any LangChain, LlamaIndex, or custom agent pipeline:
+## Accounting and limitations
 
-```python
-from pruner import ContextPruner
+- Anthropic: total prompt tokens are `input_tokens + cache_read_input_tokens +
+  cache_creation_input_tokens`. The uncached input bucket must not have cache
+  tokens subtracted a second time.
+- OpenAI Chat Completions: `prompt_tokens` includes cached tokens. The client
+  subtracts the cached subset to determine regular input. It does not implement
+  Responses API or explicit OpenAI cache breakpoints. If cache-write usage is
+  reported, monetary estimates are left unknown because newer write/TTL pricing
+  is outside this adapter's supported accounting scope.
+- Pass `pricing_per_mtok` with `input`, `output`, `cache_read`, and `cache_write`
+  rates in USD per million tokens to enable supported cost estimates. Check the
+  provider's current model, tier and cache-lifetime rates yourself. No guessed rates
+  are used. Omitted usage information can make estimates unavailable (`None`).
+- The baseline is the *same request and output* billed at the supplied regular
+  rates, without cache discounts. It is a hypothetical comparison, not a measured
+  second run. Savings can be negative, especially on a cold cache write.
+- Text-only, synchronous requests. Tool calls, multimodal inputs, streaming,
+  durable memory and automatic retries are outside scope. Unsupported history
+  formats and incomplete responses raise errors rather than silently losing content.
+- `enable_prompt_cache=False` removes the explicit Anthropic breakpoint. OpenAI's
+  automatic cache cannot be disabled with this flag.
+- Full history continues to grow. Callers must handle context limits; this project
+  does not promise bounded memory, preserved model reasoning or prompt-injection protection.
+- Unit tests replace network I/O with fixtures. They verify this client's behavior,
+  not provider uptime, real cache hits, model availability or production readiness.
 
-pruner = ContextPruner(preserve_recent_turns=2, min_lines_to_compact=10)
+## Established techniques and primary sources
 
-# Compact historical messages before sending to any model
-optimized_messages, metrics = pruner.prune(raw_messages, active_target_files=["main.py"])
+Prompt caching is a documented provider feature. Anthropic also describes context
+compaction in Claude Code, with explicit warnings about losing critical details.
+Those references validate the techniques; they do not establish adoption or
+endorsement of this repository.
 
-print(f"Token reduction: {metrics.token_reduction_percent}%")
-print(f"Blocks compacted: {metrics.blocks_compacted}")
-```
+- [Anthropic prompt caching and usage fields](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
+- [OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)
+- [Anthropic context engineering and compaction tradeoffs](https://www.anthropic.com/research/effective-context-engineering-for-ai-agents)
 
----
-
-## 🧩 Key Technical Capabilities
-
-### 1. AST Symbol Preservation
-Unlike naive line-truncation pruners that break syntax and confuse the LLM, HyperContext parses historical code through Python's `ast` parser, extracting top-level class and method signatures:
-
-```python
-# Before Compaction: 150 lines of historical implementation
-# After Compaction (Clean Syntactic Stub):
-```python
-# [ContextPruner: Historical artifact compacted (150 LOC | class RouteHandler, def verify(), def dispatch())]
-# Full implementation safely committed to project workspace.
-```
-```
-
-### 2. Provider Cache Alignment
-* **Anthropic:** Emits optimal `cache_control: {"type": "ephemeral"}` breakpoints at prefix boundaries.
-* **OpenAI:** Guarantees strict prefix stability to maximize deterministic 1,024-token cache block matches.
-* **Local (`llama.cpp` / `vLLM`):** Aligns with KV slot caching (`cache_prompt: true`) to bypass prefill latency on local GPUs (e.g. RTX 2050/3060/4090).
-
----
-
-## 🧪 Running the Test Suite
-
-```bash
-python -m unittest discover -s tests -p "test_*.py"
-```
-
-All 5 core unit tests execute in `<0.01s` with 100% pass rate.
-
----
-
-## 📄 License
-
-Distributed under the **MIT License**. See [`LICENSE`](LICENSE) for details.
+MIT license. See [LICENSE](LICENSE).

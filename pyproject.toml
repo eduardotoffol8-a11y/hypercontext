@@ -4,27 +4,24 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hypercontext"
-version = "0.1.0"
-description = "High-performance context compaction and prompt-caching orchestration engine for multi-turn LLM agents."
+version = "0.2.0"
+description = "Educational provider-native prompt caching and token usage accounting for text conversations."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [
-    { name = "AI Systems Engineering Lab" }
+    { name = "Eduardo" }
 ]
 keywords = [
     "llm",
     "prompt-caching",
-    "context-pruner",
-    "autonomous-agents",
     "claude",
     "anthropic",
     "openai",
-    "ast",
     "kv-cache"
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
@@ -41,3 +38,6 @@ classifiers = [
 Homepage = "https://github.com/eduardotoffol8-a11y/hypercontext"
 Repository = "https://github.com/eduardotoffol8-a11y/hypercontext.git"
 Issues = "https://github.com/eduardotoffol8-a11y/hypercontext/issues"
+
+[tool.setuptools]
+py-modules = ["caching_client"]

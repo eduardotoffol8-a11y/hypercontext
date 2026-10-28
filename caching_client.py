@@ -1,284 +1,145 @@
-"""
-Production Prompt Caching Client for Frontier & Local Agent Architectures.
-
-Provides unified interface across:
-- Anthropic Claude (Opus 3.5/5.5, Sonnet 3.5) via Ephemeral Prompt Caching
-- OpenAI (GPT-4o) via Automatic Prefix Caching
-- Local Inferences (vLLM, SGLang, llama.cpp) via Slot/Radix KV Cache
-"""
-
+"""Educational text client: provider-native caching without history removal."""
 from __future__ import annotations
 
+import copy
 import json
+import math
 import os
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional, Sequence, Union
-
-from pruner import CompactionMetrics, ContextPruner
-
-ProviderType = Literal["anthropic", "openai", "local"]
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 
 @dataclass(frozen=True)
 class ExecutionTelemetry:
-    """Detailed telemetry and cost economics of an agent invocation."""
     provider: str
     model: str
-    prompt_tokens: int
-    completion_tokens: int
-    cache_read_tokens: int
-    cache_write_tokens: int
-    estimated_cost_usd: float
-    estimated_baseline_cost_usd: float
-    compaction: Optional[CompactionMetrics] = None
+    prompt_tokens: Optional[int]
+    completion_tokens: Optional[int]
+    cache_read_tokens: Optional[int]
+    cache_write_tokens: Optional[int]
+    estimated_cost_usd: Optional[float]
+    estimated_baseline_cost_usd: Optional[float]
 
     @property
-    def cost_savings_usd(self) -> float:
-        """Net monetary savings achieved via Caching and Pruning."""
-        return max(0.0, round(self.estimated_baseline_cost_usd - self.estimated_cost_usd, 5))
+    def cost_savings_usd(self) -> Optional[float]:
+        if self.estimated_cost_usd is None or self.estimated_baseline_cost_usd is None:
+            return None
+        return self.estimated_baseline_cost_usd - self.estimated_cost_usd
 
     @property
-    def cost_savings_percent(self) -> float:
-        """Percentage saved compared to un-optimized full-context invocation."""
-        if self.estimated_baseline_cost_usd == 0:
-            return 0.0
-        return round((self.cost_savings_usd / self.estimated_baseline_cost_usd) * 100.0, 1)
+    def cost_savings_percent(self) -> Optional[float]:
+        savings = self.cost_savings_usd
+        if savings is None or not self.estimated_baseline_cost_usd:
+            return None
+        return 100 * savings / self.estimated_baseline_cost_usd
 
 
 class CloudAgentClient:
+    """Synchronous Anthropic Messages / OpenAI Chat Completions text adapter.
+
+    Select an available model explicitly. Optional rates are caller-supplied
+    USD per million tokens for that model and billing tier. No automatic retries.
     """
-    Unified client orchestrating Context Pruning and Prompt Caching.
 
-    Ensures prompt stability to maximize cache hits, while stripping
-    historical redundancies via the ContextPruner pipeline.
-    """
+    def __init__(self, provider: str = "anthropic", api_key: Optional[str] = None,
+                 model: Optional[str] = None,
+                 pricing_per_mtok: Optional[Mapping[str, float]] = None,
+                 timeout: float = 30.0) -> None:
+        if provider not in ("anthropic", "openai"):
+            raise ValueError("Supported providers: anthropic, openai")
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("Specify a model available to your provider account")
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout must be finite and positive")
+        self.provider = provider
+        self.model = model
+        self.api_key = api_key or os.getenv(f"{provider.upper()}_API_KEY", "")
+        if not self.api_key:
+            raise ValueError(f"Set {provider.upper()}_API_KEY or pass api_key")
+        self.timeout = timeout
+        self.rates = None
+        if pricing_per_mtok is not None:
+            if set(pricing_per_mtok) != {"input", "output", "cache_read", "cache_write"}:
+                raise ValueError("Rates must contain input, output, cache_read, cache_write")
+            if any(isinstance(v, bool) or not isinstance(v, (int, float))
+                   or not math.isfinite(v) or v < 0 for v in pricing_per_mtok.values()):
+                raise ValueError("Rates must be finite non-negative numbers")
+            self.rates = dict(pricing_per_mtok)
 
-    PRICING_PER_MTOK = {
-        "claude-3-5-sonnet-20241022": {"input": 3.00, "output": 15.00, "cache_read": 0.30, "cache_write": 3.75},
-        "claude-3-opus-20240229": {"input": 15.00, "output": 75.00, "cache_read": 1.50, "cache_write": 18.75},
-        "gpt-4o": {"input": 2.50, "output": 10.00, "cache_read": 1.25, "cache_write": 2.50},
-        "local": {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0},
-    }
+    def execute_turn(self, system_prompt: str, history: Sequence[Dict[str, Any]],
+                     user_message: str, enable_prompt_cache: bool = True
+                     ) -> Tuple[str, ExecutionTelemetry]:
+        """Send full history. The flag controls Anthropic's system breakpoint.
 
-    def __init__(
-        self,
-        provider: ProviderType = "anthropic",
-        api_key: Optional[str] = None,
-        model: Optional[str] = None,
-        preserve_recent_turns: int = 2,
-    ) -> None:
-        self.provider: ProviderType = provider
-        self.api_key: str = api_key or os.getenv(f"{self.provider.upper()}_API_KEY", "")
-        self.model: str = model or self._default_model_for_provider()
-        self.pruner = ContextPruner(preserve_recent_turns=preserve_recent_turns)
-
-    def _default_model_for_provider(self) -> str:
-        if self.provider == "anthropic":
-            return "claude-3-5-sonnet-20241022"
-        elif self.provider == "openai":
-            return "gpt-4o"
-        return "local-model"
-
-    def execute_turn(
-        self,
-        system_prompt: str,
-        history: Sequence[Dict[str, Any]],
-        user_message: str,
-        enable_prompt_cache: bool = True,
-        enable_context_pruning: bool = True,
-        active_target_files: Optional[Sequence[str]] = None,
-    ) -> Tuple[str, ExecutionTelemetry]:
+        OpenAI caching is provider-managed; this flag cannot disable it.
+        Tool calls, structured inputs and incomplete responses are unsupported.
+        Network and provider errors propagate, without automatic resubmission.
         """
-        Executes a production-optimized agent turn.
-
-        1. Performs Context Pruning on historical turns to truncate dead code.
-        2. Configures Ephemeral Prompt Caching on the static System Prompt.
-        3. Returns the LLM response alongside verified telemetry.
-        """
-        compacted_history: List[Dict[str, Any]]
-        compaction_metrics: Optional[CompactionMetrics] = None
-
-        if enable_context_pruning:
-            compacted_history, compaction_metrics = self.pruner.prune(history, active_target_files)
-        else:
-            compacted_history = list(history)
-
-        full_messages = list(compacted_history) + [{"role": "user", "content": user_message}]
-
+        if not isinstance(system_prompt, str) or not isinstance(user_message, str):
+            raise ValueError("system_prompt and user_message must be strings")
+        messages = copy.deepcopy(list(history))
+        for message in messages:
+            if (not isinstance(message, dict)
+                    or set(message) != {"role", "content"}
+                    or message["role"] not in ("user", "assistant")
+                    or not isinstance(message["content"], str)):
+                raise ValueError("History supports only user/assistant text messages (role, content)")
+        messages.append({"role": "user", "content": user_message})
         if self.provider == "anthropic":
-            response_text, telemetry = self._call_anthropic(system_prompt, full_messages, enable_prompt_cache, compaction_metrics)
-        elif self.provider == "openai":
-            response_text, telemetry = self._call_openai(system_prompt, full_messages, compaction_metrics)
-        elif self.provider == "local":
-            response_text, telemetry = self._call_local(system_prompt, full_messages, compaction_metrics)
+            url = "https://api.anthropic.com/v1/messages"
+            headers = {"x-api-key": self.api_key, "anthropic-version": "2023-06-01"}
+            system = ([{"type": "text", "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"}}]
+                      if enable_prompt_cache else system_prompt)
+            body = {"model": self.model, "max_tokens": 4096,
+                    "system": system, "messages": messages}
         else:
-            raise ValueError(f"Unsupported provider: {self.provider}")
-
-        return response_text, telemetry
-
-    def _call_anthropic(
-        self,
-        system: str,
-        messages: List[Dict[str, Any]],
-        use_cache: bool,
-        compaction: Optional[CompactionMetrics],
-    ) -> Tuple[str, ExecutionTelemetry]:
-        url = "https://api.anthropic.com/v1/messages"
-        headers = {
-            "x-api-key": self.api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        }
-
-        # Structure system prompt with Anthropic cache_control
-        system_payload: Any
-        if use_cache:
-            system_payload = [
-                {
-                    "type": "text",
-                    "text": system,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ]
+            url = "https://api.openai.com/v1/chat/completions"
+            headers = {"Authorization": f"Bearer {self.api_key}"}
+            body = {"model": self.model, "messages":
+                    [{"role": "system", "content": system_prompt}] + messages}
+        headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers)
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        if self.provider == "anthropic":
+            if data.get("stop_reason") != "end_turn":
+                raise ValueError("Incomplete or unsupported Anthropic response")
+            blocks = data.get("content", [])
+            if not blocks or any(b.get("type") != "text" for b in blocks):
+                raise ValueError("Only text responses are supported")
+            text = "".join(b["text"] for b in blocks)
         else:
-            system_payload = system
+            choice = data["choices"][0]
+            if (choice.get("finish_reason") != "stop"
+                    or choice["message"].get("tool_calls")
+                    or not isinstance(choice["message"].get("content"), str)):
+                raise ValueError("Incomplete or unsupported OpenAI response")
+            text = choice["message"]["content"]
+        return text, self._telemetry(data.get("usage", {}))
 
-        body = {
-            "model": self.model,
-            "max_tokens": 4096,
-            "system": system_payload,
-            "messages": messages,
-        }
-
-        req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers)
-        with urllib.request.urlopen(req) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-
-        usage = data.get("usage", {})
-        content = "".join([c.get("text", "") for c in data.get("content", []) if c.get("type") == "text"])
-
-        in_tok = usage.get("input_tokens", 0)
-        out_tok = usage.get("output_tokens", 0)
-        cache_read = usage.get("cache_read_input_tokens", 0)
-        cache_write = usage.get("cache_creation_input_tokens", 0)
-
-        cost, baseline = self._calculate_costs(self.model, in_tok, out_tok, cache_read, cache_write, compaction)
-
-        telemetry = ExecutionTelemetry(
-            provider="anthropic",
-            model=self.model,
-            prompt_tokens=in_tok,
-            completion_tokens=out_tok,
-            cache_read_tokens=cache_read,
-            cache_write_tokens=cache_write,
-            estimated_cost_usd=cost,
-            estimated_baseline_cost_usd=baseline,
-            compaction=compaction,
-        )
-
-        return content, telemetry
-
-    def _call_openai(
-        self,
-        system: str,
-        messages: List[Dict[str, Any]],
-        compaction: Optional[CompactionMetrics],
-    ) -> Tuple[str, ExecutionTelemetry]:
-        url = "https://api.openai.com/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        all_msgs = [{"role": "system", "content": system}] + messages
-        body = {"model": self.model, "messages": all_msgs}
-
-        req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers)
-        with urllib.request.urlopen(req) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-
-        choice = data["choices"][0]
-        usage = data.get("usage", {})
-        cached_tok = usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
-        in_tok = usage.get("prompt_tokens", 0)
-        out_tok = usage.get("completion_tokens", 0)
-
-        cost, baseline = self._calculate_costs(self.model, in_tok, out_tok, cached_tok, 0, compaction)
-
-        telemetry = ExecutionTelemetry(
-            provider="openai",
-            model=self.model,
-            prompt_tokens=in_tok,
-            completion_tokens=out_tok,
-            cache_read_tokens=cached_tok,
-            cache_write_tokens=0,
-            estimated_cost_usd=cost,
-            estimated_baseline_cost_usd=baseline,
-            compaction=compaction,
-        )
-
-        return choice["message"]["content"], telemetry
-
-    def _call_local(
-        self,
-        system: str,
-        messages: List[Dict[str, Any]],
-        compaction: Optional[CompactionMetrics],
-    ) -> Tuple[str, ExecutionTelemetry]:
-        url = "http://127.0.0.1:18101/completion"
-        prompt_text = f"<|im_start|>system\n{system}<|im_end|>\n"
-        for m in messages:
-            prompt_text += f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n"
-        prompt_text += "<|im_start|>assistant\n"
-
-        body = {
-            "prompt": prompt_text,
-            "n_predict": 2048,
-            "cache_prompt": True,
-        }
-        req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-
-        out_tok = data.get("tokens_predicted", 0)
-        telemetry = ExecutionTelemetry(
-            provider="local",
-            model="qwen3-8b",
-            prompt_tokens=self.pruner.estimate_tokens(prompt_text),
-            completion_tokens=out_tok,
-            cache_read_tokens=0,
-            cache_write_tokens=0,
-            estimated_cost_usd=0.0,
-            estimated_baseline_cost_usd=0.0,
-            compaction=compaction,
-        )
-        return data.get("content", ""), telemetry
-
-    def _calculate_costs(
-        self,
-        model: str,
-        in_tokens: int,
-        out_tokens: int,
-        cache_read: int,
-        cache_write: int,
-        compaction: Optional[CompactionMetrics],
-    ) -> Tuple[float, float]:
-        rates = self.PRICING_PER_MTOK.get(model, self.PRICING_PER_MTOK["claude-3-5-sonnet-20241022"])
-
-        # Cost under optimization:
-        regular_in = max(0, in_tokens - cache_read - cache_write)
-        cost = (
-            (regular_in * rates["input"] / 1_000_000)
-            + (cache_read * rates["cache_read"] / 1_000_000)
-            + (cache_write * rates["cache_write"] / 1_000_000)
-            + (out_tokens * rates["output"] / 1_000_000)
-        )
-
-        # Baseline cost without Caching or Pruning:
-        baseline_in = in_tokens
-        if compaction and compaction.estimated_raw_tokens > compaction.estimated_compacted_tokens:
-            diff = compaction.estimated_raw_tokens - compaction.estimated_compacted_tokens
-            baseline_in += diff
-
-        baseline_cost = (baseline_in * rates["input"] / 1_000_000) + (out_tokens * rates["output"] / 1_000_000)
-        return round(cost, 6), round(baseline_cost, 6)
+    def _telemetry(self, usage: Dict[str, Any]) -> ExecutionTelemetry:
+        if self.provider == "anthropic":
+            regular = usage.get("input_tokens")
+            read = usage.get("cache_read_input_tokens", 0)
+            write = usage.get("cache_creation_input_tokens", 0)
+            output = usage.get("output_tokens")
+            total = regular + read + write if regular is not None else None
+        else:
+            total = usage.get("prompt_tokens")
+            read = usage.get("prompt_tokens_details", {}).get("cached_tokens")
+            write = usage.get("prompt_tokens_details", {}).get("cache_write_tokens", 0)
+            output = usage.get("completion_tokens")
+            regular = total - read - write if total is not None and read is not None else None
+        counts = (regular, read, write, output)
+        if any(v is not None and (type(v) is not int or v < 0) for v in counts):
+            raise ValueError("Invalid provider token accounting")
+        cost = baseline = None
+        supported_pricing = self.provider == "anthropic" or write == 0
+        if self.rates is not None and supported_pricing and all(v is not None for v in counts):
+            r = self.rates
+            cost = (regular * r["input"] + read * r["cache_read"]
+                    + write * r["cache_write"] + output * r["output"]) / 1_000_000
+            baseline = (total * r["input"] + output * r["output"]) / 1_000_000
+        return ExecutionTelemetry(self.provider, self.model, total, output, read, write, cost, baseline)

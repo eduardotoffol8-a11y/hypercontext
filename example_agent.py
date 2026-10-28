@@ -1,34 +1,33 @@
-"""
-Demonstração de Agente com Context Pruning e Prompt Caching
-Pode ser executado com provedor mock ou chamadas reais.
-"""
-from pruner import ContextPruner
+"""Offline request demonstration. No credentials, API call or generated code execution."""
+import io
+import json
+from unittest.mock import patch
 
-def simulate_pruning():
-    pruner = ContextPruner(keep_recent_turns=2)
+from caching_client import CloudAgentClient
 
-    # Simulação de um histórico longo com blocos de código redundantes
-    history = [
-        {"role": "user", "content": "Crie um módulo de cálculo de frete."},
-        {"role": "assistant", "content": "Aqui está o módulo:\n```python\n" + "\n".join([f"def rota_{i}(): pass" for i in range(50)]) + "\n```"},
-        {"role": "user", "content": "Agora adicione a classe Veiculo."},
-        {"role": "assistant", "content": "Aqui está o veículo:\n```python\n" + "\n".join([f"class Veiculo_{i}: pass" for i in range(40)]) + "\n```"},
-        {"role": "user", "content": "Adicione validação de placa no Veiculo."},
-    ]
 
-    print("=== HISTÓRICO ORIGINAL ===")
-    raw_chars = sum(len(m["content"]) for m in history)
-    print(f"Total de caracteres brutos: {raw_chars} (~{raw_chars // 4} tokens)")
+def demonstrate():
+    history = [{"role": "user", "content": "Preserve all requirements."},
+               {"role": "assistant", "content": "```python\n" + "x = 1\n" * 30 + "```"}]
+    fixture = {"content": [{"type": "text", "text": "Offline fixture response."}],
+               "stop_reason": "end_turn",
+               "usage": {"input_tokens": 100, "output_tokens": 5,
+                         "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}
 
-    pruned = pruner.prune_messages(history)
+    def offline_transport(request, **kwargs):
+        body = json.loads(request.data)
+        assert body["messages"][:-1] == history, "History was modified"
+        print("All history retained:", len(history), "messages")
+        print("Explicit cache request:", body["system"][0]["cache_control"])
+        return io.BytesIO(json.dumps(fixture).encode())
 
-    print("\n=== HISTÓRICO APÓS CONTEXT PRUNING ===")
-    pruned_chars = sum(len(m["content"]) for m in pruned)
-    print(f"Total de caracteres podados: {pruned_chars} (~{pruned_chars // 4} tokens)")
-    print(f"Economia de tokens: {100 - (pruned_chars / raw_chars * 100):.1f}%")
+    client = CloudAgentClient(api_key="offline-placeholder", model="fixture-model")
+    with patch("urllib.request.urlopen", side_effect=offline_transport):
+        answer, telemetry = client.execute_turn("Stable review instructions.", history, "Continue.")
+    print(answer)
+    print("Estimated cost without supplied rates:", telemetry.estimated_cost_usd)
+    print("This demonstrates request construction, not an actual cache hit.")
 
-    print("\nConteúdo da mensagem antiga após poda:")
-    print(pruned[1]["content"])
 
 if __name__ == "__main__":
-    simulate_pruning()
+    demonstrate()
