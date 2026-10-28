@@ -1,110 +1,90 @@
 # HyperContext
 
-A small Python reference implementation of provider-native prompt caching and
-token-usage accounting for text conversations. Runtime uses only the Python
-standard library. This is an educational project, not a production agent platform.
+**Prompt caching e context pruning: decisões de arquitetura, receitas executáveis e operação em Anthropic e Codex.**
 
-## What this project demonstrates
+[![CI](https://github.com/eduardotoffol8-a11y/hypercontext/actions/workflows/tests.yml/badge.svg)](https://github.com/eduardotoffol8-a11y/hypercontext/actions/workflows/tests.yml)
 
-- An explicit cache breakpoint on an Anthropic system prompt.
-- Stable system instructions at the beginning of OpenAI Chat Completions requests;
-  actual cache reuse is managed by the provider.
-- Provider-specific token accounting and optional cost estimates using rates you supply.
-- Complete preservation of submitted message history, including old code blocks.
+Cache reaproveita o processamento de prefixos repetidos. Pruning retira do contexto
+ativo informações selecionadas que podem ser recuperadas quando necessário.
+São mecanismos complementares: um reduz recomputação; o outro administra o conteúdo
+que chega ao modelo. A decisão de usá-los depende da carga e do estado que a tarefa
+precisa preservar.
 
-Cache reuse depends on the model, exact matching prefix, cache lifetime, request
-length and provider routing. This client cannot guarantee cache hits or savings.
-Caching does not shrink the context window or prevent context overflow.
+Este repositório reúne padrões de uso, arquivos reutilizáveis, exemplos isolados e
+testes de contrato. Não depende de um projeto de aplicação para explicar os métodos.
 
-## Why the scope changed in 0.2.0
+## Escolha o caminho
 
-An audit found that the previous code-block pruning policy could remove relevant
-information and claim that code had been committed without checking any files or
-Git state. That functionality has been removed, including the `ContextPruner` API.
-The old simulated savings table, static passing-test badge, performance guarantees,
-and unverified local-inference compatibility claims have also been removed.
+| Ambiente | Prompt caching | Context pruning e continuidade | Arquivos |
+| --- | --- | --- | --- |
+| Anthropic Messages API | Breakpoint explícito no prefixo estável | Limpeza nativa e seletiva de resultados de ferramentas, habilitada explicitamente | [Receita executável](recipes/anthropic/request.py) e [guia](docs/anthropic.md) |
+| Claude Code | Gerenciado pelo agente da Anthropic | Seleção de evidências, estado persistido e compactação nativa | [CLAUDE.md](templates/claude-code/CLAUDE.md) e [guia](docs/claude-code.md) |
+| Codex CLI / app | Gerenciado pelo runtime; organização estável das instruções evita alterações desnecessárias | Recuperação seletiva de arquivos, estado persistido e compactação nativa da conversa | [AGENTS.md](templates/codex/AGENTS.md), [prompts](templates/codex/) e [guia](docs/codex.md) |
 
-The historical benchmark did not measure API bills, latency, task completion or
-answer quality. Its results must not be presented as measured production savings.
-See [the audit and validation record](docs/AUDIT.md).
+**Codex não é um nome alternativo para a API OpenAI.** Um `AGENTS.md` orienta o
+agente; não configura `cache_control` e não remove mensagens já presentes no
+histórico. O guia distingue seleção de contexto, pruning e compactação.
 
-## Run locally
+## Comece em poucos comandos
 
-Requires Python 3.9 or newer. Local validation was performed with Python 3.11;
-the repository CI defines additional version checks.
+Python 3.9+; as receitas usam a biblioteca padrão, sem instalação de dependências.
 
 ```bash
 git clone https://github.com/eduardotoffol8-a11y/hypercontext.git
 cd hypercontext
+python -m recipes.anthropic.request --preview
+python -m recipes.anthropic.request --preview --prune-tools
 python -m unittest discover -s tests -p "test_*.py"
-python example_agent.py
-python benchmarks.py
 ```
 
-The example and cost simulation run offline and do not require credentials.
-The file `benchmarks.py` is retained for command compatibility: it is an arithmetic
-scenario illustration, not an empirical performance benchmark.
+Os dois primeiros comandos mostram os payloads localmente. Para realizar uma
+chamada Anthropic, escolha um modelo disponível na sua conta, configure a chave no
+ambiente e use `--send`, conforme o [guia de integração](docs/anthropic.md).
+O exemplo tem histórico sintético e pequeno: demonstra a configuração, sem provocar
+um acerto de cache ou uma limpeza real.
 
-## Calling a provider
+Para Codex, incorpore as diretrizes do [template](templates/codex/AGENTS.md) ao
+`AGENTS.md` do seu projeto e use o [roteiro de instalação e continuidade](docs/codex.md).
 
-Set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` in your environment. Select a model
-currently available to your account; the client has no hardcoded model default.
+## O que torna os métodos efetivos
 
-```python
-import os
-from caching_client import CloudAgentClient
+- **Cache:** um prefixo suficientemente longo e repetido, com reutilização antes
+  da expiração, permite amortizar seu processamento. Acompanhe leituras e escritas
+  de cache; a primeira escrita pode custar mais que uma entrada comum.
+- **Pruning:** saídas volumosas, descartáveis e recuperáveis podem deixar o contexto
+  ativo. Requisitos, decisões e trabalho pendente precisam permanecer disponíveis
+  em estado verificável. O benefício deve superar a releitura e eventuais perdas
+  de cache causadas pela alteração do prefixo.
+- **Combinação:** mantenha as instruções estáveis separadas das evidências
+  transitórias. Faça a seleção na camada adequada ao ambiente e valide o resultado
+  da tarefa, além da redução de tokens.
 
-client = CloudAgentClient(provider="anthropic", model=os.environ["ANTHROPIC_MODEL"])
-answer, usage = client.execute_turn(
-    system_prompt="You review code and preserve user requirements.",
-    history=[{"role": "user", "content": "All exported dates must use UTC."}],
-    user_message="Explain the requirement you must preserve.",
-)
-print(answer)
-print(usage.prompt_tokens, usage.cache_read_tokens)
-```
+O [guia técnico](docs/methods.md) apresenta critérios de adoção, relação entre os
+custos e protocolo de avaliação. Não há percentual universal de economia.
 
-This sends your supplied system prompt, history and current message to the selected
-provider. Use only data you are authorized to send. The library does not log API keys,
-persist conversations, execute generated code, edit files or make Git commits.
-Provider retention and privacy terms still apply; caching is not a security boundary.
+## Conteúdo
 
-## Accounting and limitations
+| Arquivo | Uso |
+| --- | --- |
+| [docs/methods.md](docs/methods.md) | Arquitetura, efetividade, riscos e avaliação |
+| [docs/anthropic.md](docs/anthropic.md) | Integração Messages API, cache e tool-result clearing |
+| [docs/claude-code.md](docs/claude-code.md) | Uso no agente da Anthropic com CLAUDE.md |
+| [docs/codex.md](docs/codex.md) | Uso no Codex, instruções estáveis e continuidade |
+| [recipes/anthropic/](recipes/anthropic/) | Payload nativo e CLI com preview e envio explícito |
+| [templates/codex/](templates/codex/) | Diretrizes e prompts para adotar em outros repositórios |
+| [docs/validation.md](docs/validation.md) | Escopo dos testes e verificação em ambiente real |
+| [caching_client.py](caching_client.py) | Adaptador complementar para conversas de texto, preservando o histórico |
 
-- Anthropic: total prompt tokens are `input_tokens + cache_read_input_tokens +
-  cache_creation_input_tokens`. The uncached input bucket must not have cache
-  tokens subtracted a second time.
-- OpenAI Chat Completions: `prompt_tokens` includes cached tokens. The client
-  subtracts the cached subset to determine regular input. It does not implement
-  Responses API or explicit OpenAI cache breakpoints. If cache-write usage is
-  reported, monetary estimates are left unknown because newer write/TTL pricing
-  is outside this adapter's supported accounting scope.
-- Pass `pricing_per_mtok` with `input`, `output`, `cache_read`, and `cache_write`
-  rates in USD per million tokens to enable supported cost estimates. Check the
-  provider's current model, tier and cache-lifetime rates yourself. No guessed rates
-  are used. Omitted usage information can make estimates unavailable (`None`).
-- The baseline is the *same request and output* billed at the supplied regular
-  rates, without cache discounts. It is a hypothetical comparison, not a measured
-  second run. Savings can be negative, especially on a cold cache write.
-- Text-only, synchronous requests. Tool calls, multimodal inputs, streaming,
-  durable memory and automatic retries are outside scope. Unsupported history
-  formats and incomplete responses raise errors rather than silently losing content.
-- `enable_prompt_cache=False` removes the explicit Anthropic breakpoint. OpenAI's
-  automatic cache cannot be disabled with this flag.
-- Full history continues to grow. Callers must handle context limits; this project
-  does not promise bounded memory, preserved model reasoning or prompt-injection protection.
-- Unit tests replace network I/O with fixtures. They verify this client's behavior,
-  not provider uptime, real cache hits, model availability or production readiness.
+As receitas suportam os mecanismos documentados nas fontes oficiais. Os testes
+locais validam construção de requests, preservação de conteúdo e contabilização;
+benefícios de latência, qualidade e custo exigem medição com a carga real.
 
-## Established techniques and primary sources
+## Referências
 
-Prompt caching is a documented provider feature. Anthropic also describes context
-compaction in Claude Code, with explicit warnings about losing critical details.
-Those references validate the techniques; they do not establish adoption or
-endorsement of this repository.
+- [Anthropic: prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
+- [Anthropic: context editing](https://platform.claude.com/docs/en/build-with-claude/context-editing)
+- [Codex: instruções com AGENTS.md](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
+- [Codex: comandos e compactação](https://learn.chatgpt.com/docs/developer-commands)
+- [OpenAI: prompt caching na API](https://developers.openai.com/api/docs/guides/prompt-caching)
 
-- [Anthropic prompt caching and usage fields](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
-- [OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)
-- [Anthropic context engineering and compaction tradeoffs](https://www.anthropic.com/research/effective-context-engineering-for-ai-agents)
-
-MIT license. See [LICENSE](LICENSE).
+[Licença MIT](LICENSE).

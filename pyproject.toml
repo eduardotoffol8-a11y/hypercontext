@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hypercontext"
-version = "0.2.0"
-description = "Educational provider-native prompt caching and token usage accounting for text conversations."
+version = "0.3.0"
+description = "Prompt caching and context management recipes for Anthropic and Codex workflows."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -21,7 +21,6 @@ keywords = [
     "kv-cache"
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
@@ -41,3 +40,9 @@ Issues = "https://github.com/eduardotoffol8-a11y/hypercontext/issues"
 
 [tool.setuptools]
 py-modules = ["caching_client"]
+
+[tool.setuptools.packages.find]
+include = ["recipes*"]
+
+[tool.setuptools.package-data]
+"recipes.anthropic" = ["*.json"]

@@ -27,6 +27,9 @@ wheels/
 
 # Virtual environments
 .env
+.env.*
+!.env.example
+*.local.json
 .venv
 env/
 venv/
